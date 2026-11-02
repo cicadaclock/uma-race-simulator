@@ -25,6 +25,9 @@
 | Course | Distance correction uses last frame's ratio | Distance correction uses **this** frame's ratio |
 
 ## Pacemaker
-The front uma of the most forward strategy, re-picked only when she enters a new section (sections 1-10). If another
-strategy leads the race at two re-picks (not necessarily in a row; the re-pick at the gate doesn't count), the race
-leader becomes pacemaker until the most forward strategy leads again, and only then does the count start over. 
+The front uma of the most forward strategy, re-picked only when the race leader enters a new section (sections 1-10). If
+another strategy leads the race at two re-picks (not necessarily in a row; the re-pick at the gate doesn't count), the
+role passes to the race leader or, when she is a Sashi or Oikomi, to the best placed uma of a more forward strategy
+within `PaseMakerChangeForwardRunningStyleRange`. The count then starts over and she keeps the role until it reaches two
+again; a count that reaches two without a change of hands is kept. Once the most forward strategy leads again, it takes
+the role back on the first frame after that which is not a re-pick, and the count starts over. 
