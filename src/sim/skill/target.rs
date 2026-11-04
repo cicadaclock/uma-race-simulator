@@ -107,8 +107,7 @@ fn select_targets(race: &mut Race, t: &mut SkillTarget) {
             let vc = &o.ai.visibility;
             let n = if vc.visible_horse_count < v { vc.visible_horse_count } else { v };
             let mut list: Vec<(f32, usize)> = vc.visible_horses.iter().take(n.max(0) as usize)
-                .map(|&k| {
-                    let h = o.ai.around_horses[k].info;
+                .map(|&h| {
                     let q = race.horses[h].position;
                     // This summation order is significant in f32.
                     let (dx, dy, dz) = (p.x - q.x, p.y - q.y, p.z - q.z);
@@ -190,24 +189,23 @@ fn select_targets(race: &mut Race, t: &mut SkillTarget) {
             let cnt = ai.near_horse_count;
             let n = if v < cnt { v } else { cnt };
             let mut arr: Vec<usize> = ai.near_horses.iter().take(cnt.max(0) as usize).copied().collect();
-            let key = |k: &usize| ai.around_horses[*k].lane_gap_abs * 18.0 + ai.around_horses[*k].distance_gap_abs;
+            let key = |k: &usize| ai.around.lane_gap_abs.0[*k] * 18.0 + ai.around.distance_gap_abs.0[*k];
             crate::sim::util::intro_sort(&mut arr, |a, b| float_compare_to(key(a), key(b)));
-            arr.into_iter().take(n.max(0) as usize).map(|k| ai.around_horses[k].info).collect()
+            arr.into_iter().take(n.max(0) as usize).collect()
         }
         // SelfAndBlockFront (13), BlockSide (14)
         13 => std::iter::once(owner).chain(ai::around::block_horse_front(&race.horses[owner])).collect(),
         14 => {
             let ai = &race.horses[owner].ai;
-            ai.block_horse_in.into_iter().chain(ai.block_horse_out).map(|k| ai.around_horses[k].info).collect()
+            ai.block_horse_in.into_iter().chain(ai.block_horse_out).collect()
         }
         // NearInfront (15) / NearBehind (16): v unused, near-horse order, strict.
         15 | 16 => {
             let ai = &race.horses[owner].ai;
             let front = t.target_type == 15;
             ai.near_horses.iter().take(ai.near_horse_count.max(0) as usize)
-                .map(|&k| &ai.around_horses[k])
-                .filter(|a| if front { a.distance_gap > 0.0 } else { 0.0 > a.distance_gap })
-                .map(|a| a.info)
+                .copied()
+                .filter(|&k| if front { ai.around.distance_gap.0[k] > 0.0 } else { 0.0 > ai.around.distance_gap.0[k] })
                 .collect()
         }
         // RunningStyle (17), RunningStyleOtherSelf (18), RunningStyleTemptationOtherSelf (21: owner NOT excluded).
@@ -255,7 +253,6 @@ fn select_targets(race: &mut Race, t: &mut SkillTarget) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::ai::around::AroundHorse;
     use crate::sim::test_util::ai_race;
 
     fn target(t: i32, v: i32, debuff: bool) -> SkillTarget {
@@ -266,12 +263,10 @@ mod tests {
     fn near_sorted_by_score_and_capped() {
         let mut race = ai_race(4);
         let ai = &mut race.horses[0].ai;
-        ai.around_horses = vec![
-            AroundHorse { info: 1, distance_gap_abs: 5.0, lane_gap_abs: 0.0, ..Default::default() },
-            AroundHorse { info: 2, distance_gap_abs: 1.0, lane_gap_abs: 0.1, ..Default::default() }, // 2.8
-            AroundHorse { info: 3, distance_gap_abs: 0.5, lane_gap_abs: 0.0, ..Default::default() },
-        ];
-        ai.near_horses = vec![0, 1, 2];
+        (ai.around.distance_gap_abs.0[1], ai.around.lane_gap_abs.0[1]) = (5.0, 0.0);
+        (ai.around.distance_gap_abs.0[2], ai.around.lane_gap_abs.0[2]) = (1.0, 0.1); // 2.8
+        (ai.around.distance_gap_abs.0[3], ai.around.lane_gap_abs.0[3]) = (0.5, 0.0);
+        ai.near_horses = vec![1, 2, 3];
         ai.near_horse_count = 3;
         let mut t = target(12, 2, false);
         calc_target(&mut race, &mut t);

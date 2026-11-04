@@ -140,6 +140,9 @@ pub struct Race<'a> {
     /// Not game behaviour (analysis hook): record a frame every step instead of the replay cadence
     /// (`record_interval`). Set it between `init` and `tick::start`; only the recorded frames change.
     pub record_every_step: bool,
+    /// Not game behaviour (analysis hook): `false` records no frames, which nothing in the race reads. Set it between
+    /// `init` and `tick::start`; only the recorded frames change.
+    pub record_frames: bool,
     /// Source of `SkillParamModifier::id`, which stands in for object identity.
     pub next_modifier_id: u64,
 }
@@ -177,6 +180,7 @@ pub fn init<'a>(input: &'a RaceInput, data: &'a GameData) -> Race<'a> {
         recorder: Recorder::default(),
         record_timer: 0.0,
         record_every_step: false,
+        record_frames: true,
         next_modifier_id: 0,
     };
     let params = course::load_course_params(data, &race.info);

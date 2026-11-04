@@ -11,7 +11,7 @@ pub mod pacemaker;
 pub mod position_keep;
 pub mod temptation;
 
-use crate::sim::ai::around::{AroundHorse, Visibility};
+use crate::sim::ai::around::{AroundTable, Visibility};
 use crate::sim::ai::lane::{ActiveLanePlanner, FixedLane, LanePlanner};
 use crate::sim::ai::overtake::OvertakeTargets;
 use crate::sim::ai::position_keep::PositionKeep;
@@ -22,14 +22,14 @@ use crate::sim::physics::conserve_power::ConservePower;
 use crate::sim::physics::speed::{BaseTargetSpeeds, TargetSpeed};
 use crate::sim::race::Race;
 
-/// Per-horse AI state. References to other horses (`block_horse`, `near_horses`, the overtake list, ...) are
-/// indices into `around_horses`.
+/// Per-horse AI state. References to other horses (`block_horse`, `near_horses`, the overtake list, ...) are horse
+/// indices.
 #[derive(Clone, Debug, Default)]
 pub struct Ai {
     pub target_speed: f32,
     pub target_lane: f32,
     pub after_goal_time: f32,
-    pub around_horses: Vec<AroundHorse>,
+    pub around: Box<AroundTable>,
     pub block_horse: Option<usize>,
     pub block_horse_in: Option<usize>,
     pub block_horse_out: Option<usize>,
@@ -62,7 +62,7 @@ pub struct Ai {
     pub is_surround_out: bool,
     pub is_surround_ahead: bool,
     pub is_surround_behind: bool,
-    /// Indices into `around_horses`; the first `near_horse_count` are valid.
+    /// Horse indices; the first `near_horse_count` are valid.
     pub near_horses: Vec<usize>,
     pub near_horse_count: i32,
 }
@@ -74,8 +74,8 @@ pub fn create_ai(race: &mut Race, i: usize) {
         last_spurt_start_distance: -1.0,
         ..Default::default()
     };
-    let around: Vec<AroundHorse> = (0..race.horses.len()).filter(|&j| j != i).map(|j| AroundHorse { info: j, ..Default::default() }).collect();
-    race.horses[i].ai.around_horses = around;
+    let n_around = race.horses.len() - 1;
+    race.horses[i].ai.around = AroundTable::new(race.horses.len(), i);
     let c = PositionKeep::new(race, i);
     race.horses[i].ai.position_keep = c;
     let c = Temptation::new();
@@ -84,7 +84,6 @@ pub fn create_ai(race: &mut Race, i: usize) {
     race.horses[i].ai.lane_planner = c;
     let c = TargetSpeed::new(race, i); // RNG
     race.horses[i].ai.target_speed_calc = c;
-    let n_around = race.horses[i].ai.around_horses.len();
     race.horses[i].ai.visibility = Visibility { visible_horses: vec![0; n_around], visible_horse_count: 0 };
     let c = BaseTargetSpeeds::new(race);
     race.horses[i].ai.base_target_speeds = c;

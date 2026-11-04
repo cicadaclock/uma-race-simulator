@@ -19,7 +19,7 @@ pub fn step(race: &Race) {
     for &i in hs {
         let h = &race.horses[i];
         let cf: Vec<String> = h.compete_fight_near.iter().map(|&k| {
-            let a = &h.ai.around_horses[k];
+            let a = h.ai.around.horse(k);
             format!("{}:{:.3}/{:.4}", a.info, a.compete_fight_candidate_continue_time, a.speed_gap_abs)
         }).collect();
         println!("STEP t={t:.4} h{i} d={} v={} tv={} hp={}/{} lane={} ord={} cf={}{} g={} ct={} mode={:?} near=[{}]",
@@ -27,6 +27,6 @@ pub fn step(race: &Race) {
             h.is_compete_fight as u8, h.compete_fight_count, h.compete_fight_group, h.is_compete_top as u8,
             crate::sim::ai::position_keep::position_keep_mode(h), cf.join(" "));
         println!("     slope={:?}/{} pow={} guts={} lms={} lss={} m5={} min={} cpa={}", h.slope_type, h.slope_per, crate::sim::physics::stats::pow(h), crate::sim::physics::stats::guts(h), h.lane_move_speed, h.last_self_speed, h.skill_modifier_receiver.apply_modifier(crate::sim::defs::SkillModifierParam::CurrentSpeed, 0.0), h.min_speed, h.ai.conserve_power.accel_value);
-        println!("     ctr={} sec={} ls={} lsd={} res={} phase={:?} blk={:?}", h.compete_top_remain_time, crate::sim::horse::calc_section(race, i), crate::sim::physics::last_spurt::is_last_spurt(h) as u8, h.ai.last_spurt_start_distance, h.ai.last_spurt_calc_result, h.phase, h.ai.block_horse.map(|k| h.ai.around_horses[k].info));
+        println!("     ctr={} sec={} ls={} lsd={} res={} phase={:?} blk={:?}", h.compete_top_remain_time, crate::sim::horse::calc_section(race, i), crate::sim::physics::last_spurt::is_last_spurt(h) as u8, h.ai.last_spurt_start_distance, h.ai.last_spurt_calc_result, h.phase, h.ai.block_horse);
     }
 }

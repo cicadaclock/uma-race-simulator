@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use crate::api::{HorseInput, RaceInput};
 use crate::data::{DataEra, GameData};
 use crate::rng::RaceRandom;
-use crate::sim::ai::around::AroundHorse;
+use crate::sim::ai::around::AroundTable;
 use crate::sim::ai::order::Standings;
 use crate::sim::horse::Horse;
 use crate::sim::race::Race;
@@ -40,6 +40,7 @@ fn bare_race<'a>(data: &'a GameData, input: &'a RaceInput, seed: i32, horses: Ve
         recorder: Default::default(),
         record_timer: 0.0,
         record_every_step: false,
+        record_frames: true,
         next_modifier_id: 0,
     }
 }
@@ -59,7 +60,7 @@ pub fn ai_race(n: usize) -> Race<'static> {
         let h = &mut race.horses[i];
         h.lane_distance_max = 1.5;
         h.base_visible_distance = data.param.visibleDistance;
-        h.ai.around_horses = (0..n).filter(|&j| j != i).map(|j| AroundHorse { info: j, ..Default::default() }).collect();
+        h.ai.around = AroundTable::new(n, i);
         h.ai.visibility.visible_horses = vec![0; n - 1];
         h.ai.near_horses = vec![0; n - 1];
     }

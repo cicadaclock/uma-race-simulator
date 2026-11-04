@@ -31,7 +31,7 @@ pub fn update(race: &mut Race) {
         if h.is_compete_fight || h.compete_fight_count > 0 {
             continue;
         }
-        let partner = h.compete_fight_near.iter().map(|&k| h.ai.around_horses[k]).find(|a| {
+        let partner = h.compete_fight_near.iter().map(|&k| h.ai.around.horse(k)).find(|a| {
             let o = &race.horses[a.info];
             a.compete_fight_candidate_continue_time >= p.TargetContinueTime
                 && a.speed_gap_abs < p.SpeedGap

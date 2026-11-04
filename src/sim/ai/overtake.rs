@@ -1,6 +1,6 @@
 //! Overtake targets: who a horse is trying to pass, the overtake cooldown, and the overtake-target timers.
 
-use crate::sim::ai::around::{block_horse_front, AroundHorse};
+use crate::sim::ai::around::block_horse_front;
 use crate::sim::ai::lane;
 use crate::sim::horse::Horse;
 use crate::sim::race::Race;
@@ -9,7 +9,7 @@ use crate::sim::physics::speed::target_speed_with_skill;
 /// The horses this horse is trying to overtake. The list persists between frames.
 #[derive(Clone, Debug, Default)]
 pub struct OvertakeTargets {
-    /// Indices into the owner's `ai.around_horses`, in insertion order.
+    /// Horse indices, in insertion order.
     pub targets: Vec<usize>,
 }
 
@@ -37,11 +37,11 @@ fn collect_overtake_target(race: &mut Race, i: usize) {
     let mut list = std::mem::take(&mut race.horses[i].ai.overtake_targets.targets);
     let ai = &race.horses[i].ai;
     for &k in &ai.visibility.visible_horses[..ai.visibility.visible_horse_count as usize] {
-        if check_overtake_target(race, i, &ai.around_horses[k]) && !list.contains(&k) {
+        if check_overtake_target(race, i, k) && !list.contains(&k) {
             list.push(k);
         }
     }
-    list.retain(|&k| check_overtake_target(race, i, &ai.around_horses[k]));
+    list.retain(|&k| check_overtake_target(race, i, k));
     if let Some(b) = ai.block_horse {
         if !list.contains(&b) {
             list.push(b);
@@ -50,26 +50,28 @@ fn collect_overtake_target(race: &mut Race, i: usize) {
     race.horses[i].ai.overtake_targets.targets = list;
 }
 
-/// Whether `a` is worth overtaking. Gaps come from the start-of-frame scan; speeds are live.
-fn check_overtake_target(race: &Race, i: usize, a: &AroundHorse) -> bool {
-    if a.distance_gap < -1.0 {
+/// Whether horse `j` is worth overtaking. Gaps come from the start-of-frame scan; speeds are live.
+fn check_overtake_target(race: &Race, i: usize, j: usize) -> bool {
+    let owner = &race.horses[i];
+    let distance_gap = owner.ai.around.distance_gap.0[j];
+    if distance_gap < -1.0 {
         return false;
     }
-    let owner = &race.horses[i];
-    let other = &race.horses[a.info];
+    let other = &race.horses[j];
     // The speed getters are pure, so they are evaluated only on the paths that use them.
     let my_target = || target_speed_with_skill(owner);
     let other_speed = other.last_speed;
-    if block_horse_front(&race.horses[i]) == Some(a.info) {
+    if block_horse_front(owner) == Some(j) {
         return other_speed < my_target();
     }
-    if a.distance_gap < 1.0 || a.distance_gap > 20.0 || a.speed_gap < 0.0 {
+    let speed_gap = owner.ai.around.speed_gap.0[j];
+    if distance_gap < 1.0 || distance_gap > 20.0 || speed_gap < 0.0 {
         return false;
     }
-    if a.distance_gap / a.speed_gap > race.data.param.overTakeDistPerSpeed {
+    if distance_gap / speed_gap > race.data.param.overTakeDistPerSpeed {
         return false;
     }
-    if block_horse_front(&race.horses[a.info]).is_none() {
+    if block_horse_front(other).is_none() {
         target_speed_with_skill(other) < my_target()
     } else {
         other_speed < my_target()
@@ -80,7 +82,7 @@ fn check_overtake_target(race: &Race, i: usize, a: &AroundHorse) -> bool {
 pub fn update_overtake_target_time(race: &mut Race, i: usize, dt: f32) {
     let my_order = race.horses[i].cur_order;
     let targeted = race.horses.iter().any(|o| {
-        my_order < o.cur_order && o.ai.overtake_targets.targets.iter().any(|&k| o.ai.around_horses[k].info == i)
+        my_order < o.cur_order && o.ai.overtake_targets.targets.contains(&i)
     });
     let h = &mut race.horses[i];
     if targeted {
@@ -145,8 +147,7 @@ mod tests {
         // Horse 1: 5 m ahead, 2 m/s slower, 5/2 <= 15 → target. Horse 2: 30 m ahead (> 20 m, not visible) → not.
         update_overtake(&mut race, 0, 0.0666);
         let ai = &race.horses[0].ai;
-        let list: Vec<usize> = ai.overtake_targets.targets.iter().map(|&k| ai.around_horses[k].info).collect();
-        assert_eq!(list, [1]);
+        assert_eq!(ai.overtake_targets.targets, [1]);
         assert_eq!(ai.overtake_cool_down_time, race.data.param.overTakeCoolDownTime);
         update_overtake_target_time(&mut race, 1, 0.0666);
         assert_eq!(race.horses[1].overtake_target_continue_time, 0.0); // horse 0 is not behind horse 1 in order
@@ -180,6 +181,6 @@ mod tests {
         scan(&mut race);
         assert_eq!(block_horse_front(&race.horses[0]), Some(1));
         collect_overtake_target(&mut race, 0);
-        assert_eq!(race.horses[0].ai.overtake_targets.targets, [0]);
+        assert_eq!(race.horses[0].ai.overtake_targets.targets, [1]);
     }
 }

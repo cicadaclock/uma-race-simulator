@@ -8,8 +8,18 @@ use crate::sim::horse::Horse;
 use crate::sim::race::Race;
 use crate::sim::util::max;
 
-/// What one horse sees of another, from the start-of-frame scan. One per (observer, other) pair, in other-horse
-/// index order, self skipped.
+/// Most horses in a race that the scan tables hold.
+pub const MAX_HORSES: usize = 24;
+
+/// Lanes of one vector.
+const LANES: usize = 8;
+
+/// One value per horse, by horse index, aligned for vector access.
+#[repr(C, align(32))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HorseColumn(pub [f32; MAX_HORSES]);
+
+/// What one horse sees of another, from the start-of-frame scan: one entry of an [`AroundTable`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AroundHorse {
     /// Horse index.
@@ -25,148 +35,346 @@ pub struct AroundHorse {
     pub compete_fight_candidate_continue_time: f32,
 }
 
+/// What one horse sees of every other horse, from the start-of-frame scan, one column per value (perf: the scan fills
+/// every column for every horse, every frame). The entry of the horse itself holds nothing of use.
+#[derive(Clone, Debug, Default)]
+pub struct AroundTable {
+    pub distance_gap: HorseColumn,
+    pub distance_gap_abs: HorseColumn,
+    pub lane_gap: HorseColumn,
+    pub lane_gap_abs: HorseColumn,
+    /// Self - other (sign reversed vs the other gaps).
+    pub speed_gap: HorseColumn,
+    pub speed_gap_abs: HorseColumn,
+    pub compete_fight_candidate_continue_time: HorseColumn,
+    /// A bit per horse: more than the side block distance behind.
+    pub back: u32,
+    /// A bit per horse: every horse but the one that this table belongs to.
+    pub others: u32,
+}
+
+impl AroundTable {
+    /// The table of horse `i` in a race of `n` horses.
+    pub fn new(n: usize, i: usize) -> Box<AroundTable> {
+        assert!(n <= MAX_HORSES, "the scan tables hold {MAX_HORSES} horses, not {n}");
+        Box::new(AroundTable { others: ((1u32 << n) - 1) & !(1u32 << i), ..Default::default() })
+    }
+
+    /// The entry of horse `j`.
+    #[inline]
+    pub fn horse(&self, j: usize) -> AroundHorse {
+        AroundHorse {
+            info: j,
+            distance_gap: self.distance_gap.0[j],
+            distance_gap_abs: self.distance_gap_abs.0[j],
+            lane_gap: self.lane_gap.0[j],
+            lane_gap_abs: self.lane_gap_abs.0[j],
+            is_back: self.back >> j & 1 != 0,
+            speed_gap: self.speed_gap.0[j],
+            speed_gap_abs: self.speed_gap_abs.0[j],
+            compete_fight_candidate_continue_time: self.compete_fight_candidate_continue_time.0[j],
+        }
+    }
+
+    /// The index of every other horse, in horse order.
+    pub fn other_horses(&self) -> impl Iterator<Item = usize> {
+        let mut left = self.others;
+        std::iter::from_fn(move || {
+            (left != 0).then(|| {
+                let j = left.trailing_zeros() as usize;
+                left &= left - 1;
+                j
+            })
+        })
+    }
+}
+
 /// The horses inside the vision cone.
 #[derive(Clone, Debug, Default)]
 pub struct Visibility {
-    /// Indices into `around_horses`; the first `visible_horse_count` are valid.
+    /// Horse indices; the first `visible_horse_count` are valid.
     pub visible_horses: Vec<usize>,
     pub visible_horse_count: i32,
 }
 
-/// What the around-horse scan reads of each horse, packed (perf: the scan reads every other horse, every horse,
-/// every frame).
+/// What the around-horse scan reads of each horse, one column per value.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ScanView {
-    pub distance: f32,
-    pub lane_distance: f32,
-    pub last_speed: f32,
-    pub is_straight_last: bool,
+    pub distance: HorseColumn,
+    pub lane_distance: HorseColumn,
+    pub last_speed: HorseColumn,
+    /// A bit per horse: on the final straight.
+    pub is_straight_last: u32,
 }
 
 /// Fills `field.scan_view` from every horse. The fields are only written while horses move or by course events, so
 /// one copy taken before the pre-update loop is exact for every scan in it.
 pub fn snapshot_scan_view(race: &mut Race) {
-    let mut v = std::mem::take(&mut race.field.scan_view);
-    v.clear();
-    v.extend(race.horses.iter().map(|h| ScanView {
-        distance: h.distance,
-        lane_distance: h.lane_distance,
-        last_speed: h.last_speed,
-        is_straight_last: is_straight_last(h),
-    }));
-    race.field.scan_view = v;
+    let view = &mut race.field.scan_view;
+    view.is_straight_last = 0;
+    for (j, h) in race.horses.iter().enumerate() {
+        view.distance.0[j] = h.distance;
+        view.lane_distance.0[j] = h.lane_distance;
+        view.last_speed.0[j] = h.last_speed;
+        view.is_straight_last |= (is_straight_last(h) as u32) << j;
+    }
+}
+
+/// The limits of the scan's comparisons, from the race parameters and the horse's vision.
+struct ScanLimits {
+    surround_side_distance: f32,
+    surround_side_lane: f32,
+    surround_distance: f32,
+    surround_lane: f32,
+    near_distance: f32,
+    near_lane: f32,
+    compete_fight_lane: f32,
+    compete_fight_distance: f32,
+    side_block_distance: f32,
+    side_block_lane: f32,
+    front_block_distance: f32,
+    vision: f32,
+}
+
+/// A bit per horse for each comparison of one horse against every horse.
+#[derive(Clone, Copy, Default)]
+struct ScanMasks {
+    surround_out: u32,
+    surround_ahead: u32,
+    surround_behind: u32,
+    near: u32,
+    compete_fight_lane: u32,
+    compete_fight_far: u32,
+    back: u32,
+    front: u32,
+    side: u32,
+    lane_outside: u32,
+    lane_inside: u32,
+    side_near: u32,
+    seen: u32,
+}
+
+/// Fills the gap columns and returns the comparisons, one horse at a time.
+fn scan_lanes(view: &ScanView, table: &mut AroundTable, i: usize, n: usize, limits: &ScanLimits) -> ScanMasks {
+    let (my_distance, my_lane, my_speed) = (view.distance.0[i], view.lane_distance.0[i], view.last_speed.0[i]);
+    let mut masks = ScanMasks::default();
+    let l = limits;
+    for j in 0..n {
+        let distance = view.distance.0[j] - my_distance;
+        let distance_abs = abs_keep_neg_zero(distance);
+        let lane = view.lane_distance.0[j] - my_lane;
+        let lane_abs = abs_keep_neg_zero(lane);
+        let speed = my_speed - view.last_speed.0[j];
+        table.distance_gap.0[j] = distance;
+        table.distance_gap_abs.0[j] = distance_abs;
+        table.lane_gap.0[j] = lane;
+        table.lane_gap_abs.0[j] = lane_abs;
+        table.speed_gap.0[j] = speed;
+        table.speed_gap_abs.0[j] = abs_keep_neg_zero(speed);
+        let bit = |condition: bool| (condition as u32) << j;
+        masks.surround_out |= bit((l.surround_side_distance >= distance_abs) & (lane >= 0.0) & (l.surround_side_lane >= lane));
+        masks.surround_ahead |= bit((distance > 0.0) & (l.surround_distance >= distance) & (l.surround_lane >= lane_abs));
+        masks.surround_behind |= bit((0.0 > distance) & (distance >= -l.surround_distance) & (l.surround_lane >= lane_abs));
+        masks.near |= bit(!(distance_abs > l.near_distance) & !(lane_abs > l.near_lane));
+        masks.compete_fight_lane |= bit(l.compete_fight_lane >= lane_abs);
+        masks.compete_fight_far |= bit(l.compete_fight_distance < distance_abs);
+        masks.back |= bit(-l.side_block_distance > distance);
+        masks.front |= bit((distance > 0.0) & (distance < l.front_block_distance));
+        masks.side |= bit((distance_abs < l.side_block_distance) & (lane_abs < l.side_block_lane) & (lane_abs != 0.0));
+        masks.lane_outside |= bit(lane > 0.0);
+        masks.lane_inside |= bit(0.0 > lane);
+        masks.side_near |= bit(l.side_block_distance > distance_abs);
+        masks.seen |= bit((0.0 <= distance) & (distance <= l.vision));
+    }
+    masks
+}
+
+/// As `scan_lanes`, eight horses at a time.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn scan_lanes_avx2(view: &ScanView, table: &mut AroundTable, i: usize, n: usize, limits: &ScanLimits) -> ScanMasks {
+    use std::arch::x86_64::*;
+    let mut masks = ScanMasks::default();
+    let l = limits;
+    let (my_distance, my_lane, my_speed) =
+        (_mm256_set1_ps(view.distance.0[i]), _mm256_set1_ps(view.lane_distance.0[i]), _mm256_set1_ps(view.last_speed.0[i]));
+    let zero = _mm256_setzero_ps();
+    let sign = _mm256_set1_ps(-0.0);
+    let set = _mm256_set1_ps;
+    let (surround_side_distance, surround_side_lane) = (set(l.surround_side_distance), set(l.surround_side_lane));
+    let (surround_distance, surround_lane, surround_behind) = (set(l.surround_distance), set(l.surround_lane), set(-l.surround_distance));
+    let (near_distance, near_lane) = (set(l.near_distance), set(l.near_lane));
+    let (compete_fight_lane, compete_fight_distance) = (set(l.compete_fight_lane), set(l.compete_fight_distance));
+    let (side_block, side_block_back, side_block_lane) = (set(l.side_block_distance), set(-l.side_block_distance), set(l.side_block_lane));
+    let (front_block, vision) = (set(l.front_block_distance), set(l.vision));
+    let mut at = 0;
+    while at < n {
+        // SAFETY: `at + LANES` stays within the columns, because `n` <= MAX_HORSES, a multiple of LANES. Column alignment
+        // is that of `HorseColumn`.
+        let load = |column: &HorseColumn| unsafe { _mm256_load_ps(column.0.as_ptr().add(at)) };
+        let distance = _mm256_sub_ps(load(&view.distance), my_distance);
+        let lane = _mm256_sub_ps(load(&view.lane_distance), my_lane);
+        let speed = _mm256_sub_ps(my_speed, load(&view.last_speed));
+        // `if 0 > x { -x } else { x }`, which keeps -0.0
+        let abs = |x: __m256| _mm256_blendv_ps(x, _mm256_xor_ps(x, sign), _mm256_cmp_ps::<_CMP_LT_OQ>(x, zero));
+        let (distance_abs, lane_abs, speed_abs) = (abs(distance), abs(lane), abs(speed));
+        // SAFETY: as for `load`.
+        let put = |column: &mut HorseColumn, x: __m256| unsafe { _mm256_store_ps(column.0.as_mut_ptr().add(at), x) };
+        put(&mut table.distance_gap, distance);
+        put(&mut table.distance_gap_abs, distance_abs);
+        put(&mut table.lane_gap, lane);
+        put(&mut table.lane_gap_abs, lane_abs);
+        put(&mut table.speed_gap, speed);
+        put(&mut table.speed_gap_abs, speed_abs);
+        let bits = |x: __m256| (_mm256_movemask_ps(x) as u32) << at;
+        let and = |a: __m256, b: __m256| _mm256_and_ps(a, b);
+        let ge = |a: __m256, b: __m256| _mm256_cmp_ps::<_CMP_GE_OQ>(a, b);
+        let gt = |a: __m256, b: __m256| _mm256_cmp_ps::<_CMP_GT_OQ>(a, b);
+        let lt = |a: __m256, b: __m256| _mm256_cmp_ps::<_CMP_LT_OQ>(a, b);
+        let le = |a: __m256, b: __m256| _mm256_cmp_ps::<_CMP_LE_OQ>(a, b);
+        masks.surround_out |= bits(and(and(ge(surround_side_distance, distance_abs), ge(lane, zero)), ge(surround_side_lane, lane)));
+        masks.surround_ahead |= bits(and(and(gt(distance, zero), ge(surround_distance, distance)), ge(surround_lane, lane_abs)));
+        masks.surround_behind |= bits(and(and(gt(zero, distance), ge(distance, surround_behind)), ge(surround_lane, lane_abs)));
+        masks.near |= !bits(gt(distance_abs, near_distance)) & !bits(gt(lane_abs, near_lane)) & (0xFFu32 << at);
+        masks.compete_fight_lane |= bits(ge(compete_fight_lane, lane_abs));
+        masks.compete_fight_far |= bits(lt(compete_fight_distance, distance_abs));
+        masks.back |= bits(gt(side_block_back, distance));
+        masks.front |= bits(and(gt(distance, zero), lt(distance, front_block)));
+        masks.side |= bits(and(and(lt(distance_abs, side_block), lt(lane_abs, side_block_lane)), _mm256_cmp_ps::<_CMP_NEQ_OQ>(lane_abs, zero)));
+        masks.lane_outside |= bits(gt(lane, zero));
+        masks.lane_inside |= bits(gt(zero, lane));
+        masks.side_near |= bits(gt(side_block, distance_abs));
+        masks.seen |= bits(and(le(zero, distance), le(distance, vision)));
+        at += LANES;
+    }
+    masks
 }
 
 /// Scans every other horse: gaps, near / visible lists, front and side blockers, lane space,
 /// compete-fight candidates and the surround flags. Runs before any horse moves, so it sees start-of-frame positions
-/// (read from `field.scan_view`, see [`snapshot_scan_view`]).
+/// (read from `field.scan_view`, see [`snapshot_scan_view`]). The comparisons run on every horse at once, and only the
+/// horses that they select go through the rest.
 pub fn update_around_horses_param(race: &mut Race, i: usize, dt: f32) {
     let data = race.data;
     let p = &data.param;
-    // Only horse i's lists and scan outputs are written, and nothing reads them back through `race.horses[i]`, so
-    // they are taken out (the scalars accumulate in `scan`) and stored at the end.
-    let mut around_horses = std::mem::take(&mut race.horses[i].ai.around_horses);
-    let mut near_horses = std::mem::take(&mut race.horses[i].ai.near_horses);
-    let mut visible_horses = std::mem::take(&mut race.horses[i].ai.visibility.visible_horses);
-    let mut cf_list = std::mem::take(&mut race.horses[i].compete_fight_near);
-    let mut scan = AroundScan::default();
-    let h = &race.horses[i];
-    let my_speed = h.last_speed;
-    let my_dist = h.distance;
-    let my_lane = h.lane_distance;
-    scan.in_lane_space = my_lane;
-    scan.out_lane_space = h.lane_distance_max - my_lane;
-    // The near / visible lists are not cleared: only their first `count` entries are ever read.
-    let mut min_front = f32::MAX;
-    let vis_dist = visible_distance(h);
-    let self_straight_last = is_straight_last(h);
-    let block = &p.Block;
-    let s = &p.Surrounded;
+    let n = race.horses.len();
     let view = &race.field.scan_view;
-    for k in 0..around_horses.len() {
-        let o = &view[around_horses[k].info];
-        let a = &mut around_horses[k];
-        a.distance_gap = o.distance - my_dist;
-        a.distance_gap_abs = abs_keep_neg_zero(a.distance_gap);
-        a.lane_gap = o.lane_distance - my_lane;
-        a.lane_gap_abs = abs_keep_neg_zero(a.lane_gap);
-        a.speed_gap = my_speed - o.last_speed;
-        a.speed_gap_abs = abs_keep_neg_zero(a.speed_gap);
-        // Surround: the game stops testing a flag once it is set; the tests are pure, so a branch-free OR is the same.
-        scan.surround_out |= (s.DistanceGapAbs1 >= a.distance_gap_abs) & (a.lane_gap >= 0.0) & (s.LaneGap1 >= a.lane_gap);
-        scan.surround_ahead |= (a.distance_gap > 0.0) & (s.DistanceGap2 >= a.distance_gap) & (s.LaneGapAbs2 >= a.lane_gap_abs);
-        scan.surround_behind |= (0.0 > a.distance_gap) & (a.distance_gap >= -s.DistanceGap2) & (s.LaneGapAbs2 >= a.lane_gap_abs);
-        // Near: branch-free store (count <= k < len, and entries past the count are never read).
-        near_horses[scan.near_horse_count as usize] = k;
-        scan.near_horse_count += (!(a.distance_gap_abs > p.Near.DistanceThreshold) & !(a.lane_gap_abs > p.Near.LaneDistanceThreshold)) as i32;
-        // Compete-fight candidates: close, side by side, and either horse on the final straight.
-        let lane_ok = p.CompeteFight.LaneGap >= a.lane_gap_abs;
-        let dist_far = p.CompeteFight.DistanceGap < a.distance_gap_abs;
-        let straight = self_straight_last || o.is_straight_last;
-        if dist_far || !lane_ok || !straight {
-            if let Some(pos) = cf_list.iter().position(|&x| x == k) {
-                cf_list.remove(pos);
-            }
-            a.compete_fight_candidate_continue_time = 0.0;
-        } else if cf_list.contains(&k) {
-            a.compete_fight_candidate_continue_time = dt + a.compete_fight_candidate_continue_time;
-        } else {
-            cf_list.push(k);
-        }
-        if -block.SideBlockDistanceGap > a.distance_gap {
-            a.is_back = true;
-            continue;
-        }
-        a.is_back = false;
-        if check_front_block(p, a.distance_gap, a.lane_gap_abs) && min_front > a.distance_gap {
-            min_front = a.distance_gap;
-            scan.block_horse = Some(k);
-        }
-        if check_side_block(p, a.distance_gap_abs, a.lane_gap_abs) {
-            if a.lane_gap > 0.0 {
-                scan.block_horse_out = Some(k);
-            } else {
-                scan.block_horse_in = Some(k);
-            }
-        }
-        if block.SideBlockDistanceGap > a.distance_gap_abs {
-            if 0.0 > a.lane_gap {
-                if scan.in_lane_space > a.lane_gap_abs {
-                    scan.in_lane_space = a.lane_gap_abs;
-                }
-            } else if a.lane_gap > 0.0 && scan.out_lane_space > a.lane_gap_abs {
-                scan.out_lane_space = a.lane_gap_abs;
-            }
-        }
-        // Visible: branch-free store, as for `near_horses`.
-        visible_horses[scan.visible_horse_count as usize] = k;
-        scan.visible_horse_count += is_visible(vis_dist, a) as i32;
-    }
     let h = &mut race.horses[i];
+    let limits = ScanLimits {
+        surround_side_distance: p.Surrounded.DistanceGapAbs1,
+        surround_side_lane: p.Surrounded.LaneGap1,
+        surround_distance: p.Surrounded.DistanceGap2,
+        surround_lane: p.Surrounded.LaneGapAbs2,
+        near_distance: p.Near.DistanceThreshold,
+        near_lane: p.Near.LaneDistanceThreshold,
+        compete_fight_lane: p.CompeteFight.LaneGap,
+        compete_fight_distance: p.CompeteFight.DistanceGap,
+        side_block_distance: p.Block.SideBlockDistanceGap,
+        side_block_lane: p.Block.SideBlockLaneGap,
+        front_block_distance: p.Block.FrontBlockDistanceGap,
+        vision: visible_distance(h),
+    };
+    let vision = limits.vision;
+    let my_lane = h.lane_distance;
+    let lane_max = h.lane_distance_max;
+    let self_straight_last = is_straight_last(h);
+    let table = &mut *h.ai.around;
+    #[cfg(target_arch = "x86_64")]
+    let masks = if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the processor has AVX2.
+        unsafe { scan_lanes_avx2(view, table, i, n, &limits) }
+    } else {
+        scan_lanes(view, table, i, n, &limits)
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let masks = scan_lanes(view, table, i, n, &limits);
+    let others = table.others;
+    table.back = masks.back & others;
+    // The near / visible lists are not cleared: only their first `count` entries are ever read.
+    let mut near = masks.near & others;
+    let near_count = near.count_ones() as i32;
+    let mut at = 0;
+    while near != 0 {
+        h.ai.near_horses[at] = near.trailing_zeros() as usize;
+        at += 1;
+        near &= near - 1;
+    }
+    // Compete-fight candidates: close, side by side, and either horse on the final straight.
+    let straight = if self_straight_last { others } else { view.is_straight_last & others };
+    let candidates = masks.compete_fight_lane & !masks.compete_fight_far & straight & others;
+    let mut leaving = others & !candidates;
+    while leaving != 0 {
+        let j = leaving.trailing_zeros() as usize;
+        if let Some(pos) = h.compete_fight_near.iter().position(|&x| x == j) {
+            h.compete_fight_near.remove(pos);
+        }
+        table.compete_fight_candidate_continue_time.0[j] = 0.0;
+        leaving &= leaving - 1;
+    }
+    let mut entering = candidates;
+    while entering != 0 {
+        let j = entering.trailing_zeros() as usize;
+        if h.compete_fight_near.contains(&j) {
+            table.compete_fight_candidate_continue_time.0[j] = dt + table.compete_fight_candidate_continue_time.0[j];
+        } else {
+            h.compete_fight_near.push(j);
+        }
+        entering &= entering - 1;
+    }
+    let ahead = others & !masks.back;
+    let mut min_front = f32::MAX;
+    let mut block_horse = None;
+    let mut front = masks.front & ahead;
+    while front != 0 {
+        let j = front.trailing_zeros() as usize;
+        let distance = table.distance_gap.0[j];
+        if check_front_block(p, distance, table.lane_gap_abs.0[j]) && min_front > distance {
+            min_front = distance;
+            block_horse = Some(j);
+        }
+        front &= front - 1;
+    }
+    let side = masks.side & ahead;
+    let last = |set: u32| (set != 0).then(|| 31 - set.leading_zeros() as usize);
+    h.ai.block_horse_out = last(side & masks.lane_outside);
+    h.ai.block_horse_in = last(side & !masks.lane_outside);
+    h.ai.block_horse = block_horse;
+    let mut in_lane_space = my_lane;
+    let mut near_inside = masks.side_near & ahead & masks.lane_inside;
+    while near_inside != 0 {
+        let gap = table.lane_gap_abs.0[near_inside.trailing_zeros() as usize];
+        if in_lane_space > gap {
+            in_lane_space = gap;
+        }
+        near_inside &= near_inside - 1;
+    }
+    let mut out_lane_space = lane_max - my_lane;
+    let mut near_outside = masks.side_near & ahead & masks.lane_outside;
+    while near_outside != 0 {
+        let gap = table.lane_gap_abs.0[near_outside.trailing_zeros() as usize];
+        if out_lane_space > gap {
+            out_lane_space = gap;
+        }
+        near_outside &= near_outside - 1;
+    }
+    let mut visible_count = 0;
+    if vision > 0.0 {
+        let mut seen = masks.seen & ahead;
+        while seen != 0 {
+            let j = seen.trailing_zeros() as usize;
+            if is_visible(vision, table.distance_gap.0[j], table.lane_gap_abs.0[j]) {
+                h.ai.visibility.visible_horses[visible_count] = j;
+                visible_count += 1;
+            }
+            seen &= seen - 1;
+        }
+    }
     h.ai.is_around_horse_initialized = true;
-    (h.ai.block_horse, h.ai.block_horse_in, h.ai.block_horse_out) = (scan.block_horse, scan.block_horse_in, scan.block_horse_out);
-    (h.ai.in_lane_space, h.ai.out_lane_space) = (scan.in_lane_space, scan.out_lane_space);
-    (h.ai.near_horse_count, h.ai.visibility.visible_horse_count) = (scan.near_horse_count, scan.visible_horse_count);
-    h.ai.around_horses = around_horses;
-    h.ai.near_horses = near_horses;
-    h.ai.visibility.visible_horses = visible_horses;
-    h.compete_fight_near = cf_list;
-    (h.ai.is_surround_out, h.ai.is_surround_ahead, h.ai.is_surround_behind) = (scan.surround_out, scan.surround_ahead, scan.surround_behind);
-}
-
-/// The scalar outputs of `update_around_horses_param`, accumulated locally (see there).
-#[derive(Default)]
-struct AroundScan {
-    block_horse: Option<usize>,
-    block_horse_in: Option<usize>,
-    block_horse_out: Option<usize>,
-    in_lane_space: f32,
-    out_lane_space: f32,
-    near_horse_count: i32,
-    visible_horse_count: i32,
-    surround_out: bool,
-    surround_ahead: bool,
-    surround_behind: bool,
+    (h.ai.in_lane_space, h.ai.out_lane_space) = (in_lane_space, out_lane_space);
+    (h.ai.near_horse_count, h.ai.visibility.visible_horse_count) = (near_count, visible_count as i32);
+    h.ai.is_surround_out = masks.surround_out & others != 0;
+    h.ai.is_surround_ahead = masks.surround_ahead & others != 0;
+    h.ai.is_surround_behind = masks.surround_behind & others != 0;
 }
 
 /// `|x|`, but -0.0 stays -0.0 (unlike `f32::abs`), as in the game.
@@ -190,23 +398,14 @@ pub fn check_front_block(p: &ParamDefine, distance_gap: f32, lane_gap_abs: f32) 
     !(lane_gap_abs > tol)
 }
 
-/// Whether a horse alongside blocks a side (one in exactly the same lane does not).
-pub fn check_side_block(p: &ParamDefine, distance_gap_abs: f32, lane_gap_abs: f32) -> bool {
-    let b = &p.Block;
-    if distance_gap_abs >= b.SideBlockDistanceGap || lane_gap_abs >= b.SideBlockLaneGap {
-        return false;
-    }
-    0.0 > lane_gap_abs || lane_gap_abs > 0.0
-}
-
-/// Whether `a` is inside the vision cone of depth `v`: half-width 1/18 lane at the nose, widening to 0.375 at `v`.
-pub fn is_visible(v: f32, a: &AroundHorse) -> bool {
-    if 0.0 >= v || 0.0 > a.distance_gap || a.distance_gap > v {
+/// Whether a horse is inside the vision cone of depth `v`: half-width 1/18 lane at the nose, widening to 0.375 at `v`.
+pub fn is_visible(v: f32, distance_gap: f32, lane_gap_abs: f32) -> bool {
+    if 0.0 >= v || 0.0 > distance_gap || distance_gap > v {
         return false;
     }
     // Evaluated in f64 as one expression.
-    let w = (((a.distance_gap as f64 / v as f64) * 0.638888896f32 as f64 + 0.111111112f32 as f64) * 0.5) as f32;
-    !(a.lane_gap_abs > w)
+    let w = ((distance_gap as f64 / v as f64) * 0.638888896f32 as f64 + 0.111111112f32 as f64) * 0.5;
+    !(lane_gap_abs > w as f32)
 }
 
 /// Front / side block timers, from the start-of-frame scan.
@@ -308,8 +507,7 @@ pub fn update_behind_horse_near_time_param_set(race: &mut Race, i: usize, dt: f3
 
 /// The front-block horse index.
 pub fn block_horse_front(h: &Horse) -> Option<usize> {
-    let ai = &h.ai;
-    ai.block_horse.map(|k| ai.around_horses[k].info)
+    h.ai.block_horse
 }
 
 /// On the final straight.
@@ -390,15 +588,12 @@ mod tests {
         update_around_horses_param(&mut race, 0, 0.0666);
         let ai = &race.horses[0].ai;
         assert_eq!(block_horse_front(&race.horses[0]), Some(1));
-        assert_eq!(ai.block_horse_in.map(|k| ai.around_horses[k].info), Some(4));
-        assert_eq!(ai.block_horse_out.map(|k| ai.around_horses[k].info), Some(2)); // 1.0 m < 1.05 m, lane +0.01
+        assert_eq!(ai.block_horse_in, Some(4));
+        assert_eq!(ai.block_horse_out, Some(2)); // 1.0 m < 1.05 m, lane +0.01
         assert!((ai.in_lane_space - 0.05).abs() < 1e-6);
         assert!((ai.out_lane_space - 0.01).abs() < 1e-6);
-        assert!(ai.around_horses[4].is_back); // horse 5 → around index 4
-        let vis: Vec<usize> = ai.visibility.visible_horses[..ai.visibility.visible_horse_count as usize]
-            .iter()
-            .map(|&k| ai.around_horses[k].info)
-            .collect();
+        assert!(ai.around.horse(5).is_back);
+        let vis = &ai.visibility.visible_horses[..ai.visibility.visible_horse_count as usize];
         assert_eq!(vis, [1, 2, 3]); // cone half-width at 0.5 m ≈ 0.0635 ≥ 0.05
         assert_eq!(ai.near_horse_count, 5);
         assert!(!is_enable_in_move(&race.horses[0]));

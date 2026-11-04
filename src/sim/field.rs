@@ -48,7 +48,7 @@ pub struct Field {
     /// Reused buffer for `update_overlap` (no per-frame allocation).
     pub sorted_by_lane_buf: Vec<usize>,
     /// Start-of-frame copy for the around-horse scans, see [`crate::sim::ai::around::snapshot_scan_view`].
-    pub scan_view: Vec<crate::sim::ai::around::ScanView>,
+    pub scan_view: crate::sim::ai::around::ScanView,
 }
 
 /// RNG draws happen in this order.

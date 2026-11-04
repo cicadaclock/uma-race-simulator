@@ -125,7 +125,7 @@ pub(super) fn value_lh(race: &Race, owner: usize, kind: &SkillTriggerKind) -> i3
             let mut c = 0;
             let mut i = 0;
             while (i as i32) < h.ai.near_horse_count {
-                let g = h.ai.around_horses[h.ai.near_horses[i]].distance_gap;
+                let g = h.ai.around.distance_gap.0[h.ai.near_horses[i]];
                 if front {
                     if g > 0.0 {
                         c += 1;

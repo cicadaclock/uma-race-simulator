@@ -1,7 +1,7 @@
 //! Lanes: the target-lane calculator and its strategies (Normal / Overtake / Fixed), force-in, and the lane move.
 
 use crate::sim::ai::{self, position_keep};
-use crate::sim::ai::around::{check_lane_space, is_enable_in_move, is_enable_out_move, AroundHorse};
+use crate::sim::ai::around::{check_lane_space, is_enable_in_move, is_enable_out_move};
 use crate::sim::ai::overtake::{is_overtake, is_overtake_or_cool_down};
 use crate::sim::defs::{Phase, PositionKeepMode, SkillModifierParam};
 use crate::sim::horse::Horse;
@@ -222,7 +222,7 @@ fn search_normal(race: &Race, i: usize, calc: &RaceLanePlanner) -> f32 {
     if h.phase != Phase::MiddleRun {
         return lane;
     }
-    let Some(b) = h.ai.block_horse_in.map(|k| &h.ai.around_horses[k]) else {
+    let Some(b) = h.ai.block_horse_in.map(|k| h.ai.around.horse(k)) else {
         return lane;
     };
     if !(p.Block.SideBlockLaneGap - 0.013888889 > b.lane_gap_abs) {
@@ -256,9 +256,8 @@ fn search_overtake(race: &Race, i: usize, calc: &mut RaceLanePlanner) -> f32 {
     cand.clear();
     let mut min_target_dist = f32::MAX;
     let vis = &h.ai.visibility.visible_horses[..h.ai.visibility.visible_horse_count as usize];
-    let exists = |d_max: f32, l_min: f32, l_max: f32| check_horse_exist(race, &h.ai.around_horses, vis, h.distance, d_max, l_min, l_max);
-    for &k in &h.ai.overtake_targets.targets {
-        let o = h.ai.around_horses[k].info;
+    let exists = |d_max: f32, l_min: f32, l_max: f32| check_horse_exist(race, vis, h.distance, d_max, l_min, l_max);
+    for &o in &h.ai.overtake_targets.targets {
         if min_target_dist > race.horses[o].distance {
             min_target_dist = race.horses[o].distance;
         }
@@ -363,9 +362,9 @@ fn check_enable_move_lane(race: &Race, h: &Horse, c: f32) -> bool {
 }
 
 /// Any visible horse (live distance and lane) inside the box.
-fn check_horse_exist(race: &Race, around: &[AroundHorse], vis: &[usize], d_min: f32, d_max: f32, l_min: f32, l_max: f32) -> bool {
+fn check_horse_exist(race: &Race, vis: &[usize], d_min: f32, d_max: f32, l_min: f32, l_max: f32) -> bool {
     vis.iter().any(|&k| {
-        let o = &race.horses[around[k].info];
+        let o = &race.horses[k];
         let (d, l) = (o.distance, o.lane_distance);
         !(d_min > d) && !(d > d_max) && !(l_min > l) && !(l > l_max)
     })
@@ -377,18 +376,20 @@ fn crowd_edge_horse(race: &Race, start: usize, g: f32, is_in: bool) -> usize {
     let horse = &race.horses[start];
     let mut best_lane = horse.lane_distance;
     let mut best = None;
-    for a in &horse.ai.around_horses {
-        if 0.0 > a.distance_gap || a.distance_gap > 3.0 || a.lane_gap_abs >= g {
+    let table = &*horse.ai.around;
+    for j in table.other_horses() {
+        let (distance_gap, lane_gap) = (table.distance_gap.0[j], table.lane_gap.0[j]);
+        if 0.0 > distance_gap || distance_gap > 3.0 || table.lane_gap_abs.0[j] >= g {
             continue;
         }
-        let side_ok = if is_in { 0.0 > a.lane_gap } else { a.lane_gap > 0.0 };
+        let side_ok = if is_in { 0.0 > lane_gap } else { lane_gap > 0.0 };
         if !side_ok {
             continue;
         }
-        let l = race.horses[a.info].lane_distance;
+        let l = race.horses[j].lane_distance;
         if (is_in && l < best_lane) || (!is_in && l > best_lane) {
             best_lane = l;
-            best = Some(a.info);
+            best = Some(j);
         }
     }
     match best {
@@ -533,8 +534,7 @@ mod tests {
     }
 
     fn search_ot(race: &mut Race, targets: &[usize]) -> f32 {
-        let list = targets.iter().map(|&t| race.horses[0].ai.around_horses.iter().position(|a| a.info == t).unwrap()).collect();
-        race.horses[0].ai.overtake_targets.targets = list;
+        race.horses[0].ai.overtake_targets.targets = targets.to_vec();
         let mut calc = RaceLanePlanner::default();
         search(race, 0, &mut calc, TargetLaneStrategy::Overtake)
     }

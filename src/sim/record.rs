@@ -79,6 +79,9 @@ pub fn record_spans(race: &mut Race) {
 }
 
 pub fn record(race: &mut Race) {
+    if !race.record_frames {
+        return;
+    }
     let horses = (0..race.horses.len())
         .map(|i| {
             let h = &race.horses[i];

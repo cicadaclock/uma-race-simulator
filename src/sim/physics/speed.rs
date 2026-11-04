@@ -287,14 +287,13 @@ pub fn update_min_speed(race: &mut Race, i: usize) {
 pub fn calc_max_speed(race: &Race, i: usize) -> f32 {
     let h = &race.horses[i];
     let Some(b) = h.ai.block_horse else { return 30.0 };
-    let b = &h.ai.around_horses[b];
     let p = &race.data.param.Block;
-    let mut x = b.distance_gap / p.FrontBlockDistanceGap;
+    let mut x = h.ai.around.distance_gap.0[b] / p.FrontBlockDistanceGap;
     x = clamp01(x);
     x = clamp01(x); // clamped twice
     let (lo, hi) = (p.FrontBlockMaxSpeedRateMin, p.FrontBlockMaxSpeedRateMax);
     // The rate `(hi - lo) * x + lo` is one f64 expression rounded to f32, then an f32 product.
-    let cap = race.horses[b.info].last_speed * (((hi as f64 - lo as f64) * x as f64 + lo as f64) as f32);
+    let cap = race.horses[b].last_speed * (((hi as f64 - lo as f64) * x as f64 + lo as f64) as f32);
     max(h.min_speed, cap)
 }
 

@@ -99,6 +99,16 @@ impl SkillTriggerCollection {
             SkillTriggerCollection::Collection { start, len, .. } => start as usize..(start + len) as usize,
         }
     }
+
+    /// Follows a move of this collection's triggers by `offset` places in the arena.
+    pub fn move_in_arena(&mut self, offset: i64) {
+        if let SkillTriggerCollection::Collection { start, wake, .. } = self {
+            *start = (*start as i64 + offset) as u32;
+            if wake.sentinel != NO_SENTINEL {
+                wake.sentinel = (wake.sentinel as i64 + offset) as u32;
+            }
+        }
+    }
 }
 
 /// One condition term: `keyword op value_rh`. `kind == Null` (unknown keyword) is never activated and never updates.
