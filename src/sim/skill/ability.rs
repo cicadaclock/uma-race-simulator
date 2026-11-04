@@ -111,7 +111,7 @@ fn set_param_one_time(race: &mut Race, r: SkillDetailRef, ability: usize, h: usi
 /// `ability_value_on_activate` (so heal counts still see a heal) and the additional-activate counters. Durations,
 /// cooldowns and events live in `skill::detail_*` and are untouched; `add_ability_time`/`stop` just walk an empty list,
 /// and the skipped modifier ids don't matter (only compared for equality). Exception: types 36/37 (activate random
-/// skills; unused in current data) are not muted, because their modifier feeds an RNG draw
+/// skills; 564 Escapades holds type 37) are not muted, because their modifier feeds an RNG draw
 /// (`update_random_activate_skill_id_list`) and muting them would reshuffle the race.
 pub fn activate(race: &mut Race, r: SkillDetailRef, ability: usize, is_additional_activate: bool) {
     target::calc_targets(race, r, ability);

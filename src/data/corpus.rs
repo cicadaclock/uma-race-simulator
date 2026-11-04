@@ -162,6 +162,7 @@ fn horse(h: SaveHorse) -> HorseInput {
         muted_skills: Vec::new(),
         wiz_alt: None,
         muted_mechanics: 0,
+        observed_skills: Vec::new(),
     }
 }
 

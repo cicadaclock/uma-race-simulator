@@ -99,7 +99,7 @@ fn calc_ability_value(race: &mut Race, owner: usize, c: &AbilityValue) -> f32 {
     let h = &race.horses[owner];
     let multiply = match c.usage {
         2 => {
-            let mut n = h.skill_manager.skills.len() as i32 - 1;
+            let mut n = (0..h.skill_manager.skills.len()).filter(|&s| !h.skill_manager.is_silent(s)).count() as i32 - 1;
             if n <= 0 {
                 n = 0;
             }

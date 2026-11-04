@@ -81,7 +81,12 @@ impl HorseData {
 /// Oonige = a Nige with any skill holding a RunningStyleExOonige (type 6) ability slot.
 pub fn running_style_ex(skills: &HashMap<i32, SkillData>, input: &HorseInput) -> RunningStyleEx {
     let oonige = input.running_style == RunningStyle::Nige as i32
-        && input.skills.iter().filter_map(|s| skills.get(&s.skill_id)).any(|s| s.details.iter().flat_map(|d| &d.abilities).any(|a| a.ability_type == 6));
+        && input
+            .skills
+            .iter()
+            .filter(|s| !input.is_silent_skill(s.skill_id))
+            .filter_map(|s| skills.get(&s.skill_id))
+            .any(|s| s.details.iter().flat_map(|d| &d.abilities).any(|a| a.ability_type == 6));
     if oonige { RunningStyleEx::Oonige } else { RunningStyleEx::None }
 }
 

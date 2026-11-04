@@ -280,11 +280,12 @@ fn check_activate(race: &mut Race, r: SkillDetailRef, t: &mut SkillTrigger, othe
         K::SameSkillHorseCount { same_skill_horse_count, is_initialized } => {
             if !*is_initialized {
                 let id = race.horses[owner].skill_manager.skills[r.skill].skill_master.id;
-                for h in &race.horses {
+                for (j, h) in race.horses.iter().enumerate() {
                     if !h.is_skill_initialized {
                         return false;
                     }
-                    if skill::find_skill(&h.skill_manager, id).is_some() {
+                    // A silent skill counts only for its own owner, whose race it is watching.
+                    if skill::find_skill(&h.skill_manager, id).is_some_and(|k| j == owner || !h.skill_manager.is_silent(k)) {
                         *same_skill_horse_count += 1;
                     }
                 }

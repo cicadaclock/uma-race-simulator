@@ -40,6 +40,30 @@ pub struct SkillManager {
     /// Set once construction is done. Before that `find_skill` finds nothing, so duplicate ids are not dropped
     /// while skills are added.
     pub has_skill_array: bool,
+    /// The observed skills of a horse that has any (see [`crate::api::HorseInput::observed_skills`]). Kept behind one
+    /// pointer, so that other horses pay nothing in the per-frame skill walk.
+    pub observed: Option<Box<ObservedSkills>>,
+}
+
+/// What a horse holds for its observed skills, indexed by skill.
+#[derive(Clone, Debug, Default)]
+pub struct ObservedSkills {
+    /// The own generator of an observed skill.
+    pub own_rngs: Vec<Option<Box<crate::rng::RaceRandom>>>,
+    /// Whether the skill is observed and muted, so that everything else in the race treats it as absent.
+    pub silent: Vec<bool>,
+}
+
+impl SkillManager {
+    /// Whether skill index `s` is silent.
+    pub fn is_silent(&self, s: usize) -> bool {
+        self.observed.as_ref().is_some_and(|o| o.silent.get(s).is_some_and(|&silent| silent))
+    }
+
+    /// Whether skill index `s` is observed.
+    fn is_observed(&self, s: usize) -> bool {
+        self.observed.as_ref().is_some_and(|o| o.own_rngs.get(s).is_some_and(Option::is_some))
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -139,10 +163,20 @@ pub fn create_skill(race: &mut Race, i: usize) {
         if find_skill(&race.horses[i].skill_manager, m.id).is_some() {
             continue;
         }
+        let id = m.id;
         let sm = &mut race.horses[i].skill_manager;
-        sm.skills.push(SkillBase { id: m.id, priority: m.priority, skill_master: Box::new(m), level: s.level, ..Default::default() });
+        sm.skills.push(SkillBase { id, priority: m.priority, skill_master: Box::new(m), level: s.level, ..Default::default() });
         let si = sm.skills.len() - 1;
-        setup_detail(race, i, si);
+        if race.input.horses[i].observed_skills.contains(&id) {
+            let mixed = (race.info.random_seed as u32).wrapping_mul(0x9E37_79B1) ^ (id as u32).wrapping_mul(0x85EB_CA77);
+            let silent = race.input.horses[i].is_silent_skill(id);
+            let observed = race.horses[i].skill_manager.observed.get_or_insert_default();
+            observed.own_rngs.resize_with(si + 1, || None);
+            observed.silent.resize(si + 1, false);
+            observed.own_rngs[si] = Some(Box::new(crate::rng::RaceRandom::new((mixed & 0x7fff_ffff) as i32)));
+            observed.silent[si] = silent;
+        }
+        on_skill_stream(race, i, si, |race| setup_detail(race, i, si));
     }
     race.horses[i].skill_manager.has_skill_array = true;
     race.horses[i].is_skill_initialized = true;
@@ -220,6 +254,17 @@ fn create_ability(race: &mut Race, r: SkillDetailRef, level: i32, ab: &SkillAbil
     }
 }
 
+/// Runs `body` with the generator of an observed skill in place of the race's, and plainly for any other skill.
+fn on_skill_stream<R>(race: &mut Race, i: usize, s: usize, body: impl FnOnce(&mut Race) -> R) -> R {
+    let own = race.horses[i].skill_manager.observed.as_mut().and_then(|o| o.own_rngs.get_mut(s)).and_then(Option::take);
+    let Some(mut own) = own else { return body(race) };
+    std::mem::swap(&mut race.rng, &mut *own);
+    let result = body(race);
+    std::mem::swap(&mut race.rng, &mut *own);
+    race.horses[i].skill_manager.observed.as_mut().expect("the skill was observed").own_rngs[s] = Some(own);
+    result
+}
+
 /// Pre-race wiz lot: decides which `activate_lot` skills may activate this race. `base_wiz` is the halved wiz.
 pub fn lot_activate_skill(race: &mut Race, i: usize) {
     let p = &race.data.param.Skill;
@@ -230,7 +275,7 @@ pub fn lot_activate_skill(race: &mut Race, i: usize) {
             // One f64 expression, rounded at the store.
             let thr = (v1 as f64 - v2 as f64 / wiz as f64) as f32;
             let thr = if min > thr { min } else { thr };
-            let r = race.rng.random_float(100.0);
+            let r = on_skill_stream(race, i, s, |race| race.rng.random_float(100.0));
             r < thr
         } else {
             true
@@ -242,7 +287,7 @@ pub fn lot_activate_skill(race: &mut Race, i: usize) {
 pub fn check_skill_trigger_and_activate_first_group(race: &mut Race, i: usize) {
     for s in 0..race.horses[i].skill_manager.skills.len() {
         if race.horses[i].skill_manager.skills[s].priority == 1 {
-            skill_base_check_trigger_and_activate(race, i, s);
+            on_skill_stream(race, i, s, |race| skill_base_check_trigger_and_activate(race, i, s));
         }
     }
 }
@@ -250,7 +295,7 @@ pub fn check_skill_trigger_and_activate_first_group(race: &mut Race, i: usize) {
 pub fn check_skill_trigger_and_activate_second_group(race: &mut Race, i: usize) {
     for s in 0..race.horses[i].skill_manager.skills.len() {
         if race.horses[i].skill_manager.skills[s].priority == 0 {
-            skill_base_check_trigger_and_activate(race, i, s);
+            on_skill_stream(race, i, s, |race| skill_base_check_trigger_and_activate(race, i, s));
         }
     }
 }
@@ -267,6 +312,9 @@ pub fn skill_base_check_trigger_and_activate(race: &mut Race, i: usize, s: usize
 }
 
 pub fn update_first_group(race: &mut Race, i: usize, dt: f32) {
+    if race.horses[i].skill_manager.observed.is_some() {
+        return update_group_with_observed_skills(race, i, 1, dt);
+    }
     for s in 0..race.horses[i].skill_manager.skills.len() {
         if race.horses[i].skill_manager.skills[s].priority == 1 {
             skill_base_update(race, i, s, dt);
@@ -275,12 +323,32 @@ pub fn update_first_group(race: &mut Race, i: usize, dt: f32) {
 }
 
 pub fn update_second_group(race: &mut Race, i: usize, dt: f32) {
-    for s in 0..race.horses[i].skill_manager.skills.len() {
-        if race.horses[i].skill_manager.skills[s].priority == 0 {
-            skill_base_update(race, i, s, dt);
+    if race.horses[i].skill_manager.observed.is_some() {
+        update_group_with_observed_skills(race, i, 0, dt);
+    } else {
+        for s in 0..race.horses[i].skill_manager.skills.len() {
+            if race.horses[i].skill_manager.skills[s].priority == 0 {
+                skill_base_update(race, i, s, dt);
+            }
         }
     }
     update_random_activate_skill_id_list(race, i);
+}
+
+/// One update group of a horse with observed skills, each observed skill on its generator. A dormant observed skill
+/// keeps its generator in place, because the swap would cost more than the update it skips.
+#[cold]
+fn update_group_with_observed_skills(race: &mut Race, i: usize, priority: i32, dt: f32) {
+    for s in 0..race.horses[i].skill_manager.skills.len() {
+        if race.horses[i].skill_manager.skills[s].priority != priority {
+            continue;
+        }
+        if !race.horses[i].skill_manager.is_observed(s) {
+            skill_base_update(race, i, s, dt);
+        } else if !is_dormant(race, i, s) {
+            on_skill_stream(race, i, s, |race| skill_base_update(race, i, s, dt));
+        }
+    }
 }
 
 /// The skill list itself is kept; finished horses no longer update skills.
@@ -293,6 +361,9 @@ pub fn clear_skills(race: &mut Race, i: usize) {
 }
 
 fn add_prev_activate_skill_detail(race: &mut Race, r: SkillDetailRef) {
+    if race.horses[r.horse].skill_manager.is_silent(r.skill) {
+        return;
+    }
     let l = &mut race.horses[r.horse].skill_manager.prev_activated_details;
     if !l.contains(&r) {
         l.push(r);
@@ -454,6 +525,11 @@ pub fn detail_activate(race: &mut Race, r: SkillDetailRef) {
     if !h.skill_manager.activate_skills.contains(&r) {
         h.skill_manager.activate_skills.push(r);
     }
+    if h.skill_manager.is_silent(r.skill) {
+        let infinite = detail(race, r).is_time_infinite;
+        record::open_skill_span(race, r, id, infinite);
+        return;
+    }
     if !h.skill_manager.used_skill_ids.contains(&id) {
         h.skill_manager.used_skill_ids.push(id);
     }
@@ -553,7 +629,7 @@ pub fn detail_is_reserved_random_activate(race: &Race, r: SkillDetailRef) -> boo
     r.detail == 0 && race.horses[r.horse].skill_manager.reserved_skill_ids.contains(&skill_id(race, r))
 }
 
-/// Re-draws the skills reserved for random activation (ability types 36/37, unused in current data): per modifier,
+/// Re-draws the skills reserved for random activation (ability types 36/37, which 564 Escapades holds): per modifier,
 /// up to n eligible skills drawn from the race RNG.
 pub fn update_random_activate_skill_id_list(race: &mut Race, i: usize) {
     use crate::sim::defs::SkillModifierParam as P;
@@ -564,23 +640,36 @@ pub fn update_random_activate_skill_id_list(race: &mut Race, i: usize) {
             continue;
         }
         let sm = &race.horses[i].skill_manager;
-        let mut cand: Vec<i32> = sm
-            .skills
-            .iter()
-            .filter(|s| {
-                let m = &s.skill_master;
-                rarities.contains(&m.rarity)
-                    && m.details[0].float_ability_time != -1
-                    && s.cool_down_time <= 0.0
-                    && m.is_general_skill == 1
-                    && sm.activate_skills.iter().all(|d| race.horses[d.horse].skill_manager.skills[d.skill].skill_master.id != m.id)
-                    && !sm.reserved_skill_ids.contains(&m.id)
-            })
-            .map(|s| s.skill_master.id)
-            .collect();
-        for _ in 0..n.min(cand.len() as i32) {
+        let eligible = |s: &SkillBase| {
+            let m = &s.skill_master;
+            rarities.contains(&m.rarity)
+                && m.details[0].float_ability_time != -1
+                && s.cool_down_time <= 0.0
+                && m.is_general_skill == 1
+                && sm.activate_skills.iter().all(|d| race.horses[d.horse].skill_manager.skills[d.skill].skill_master.id != m.id)
+                && !sm.reserved_skill_ids.contains(&m.id)
+        };
+        let skills = sm.skills.iter().enumerate();
+        let mut cand: Vec<i32> = skills.clone().filter(|(k, s)| !sm.is_observed(*k) && eligible(s)).map(|(_, s)| s.skill_master.id).collect();
+        let observed: Vec<usize> = skills.filter(|(k, s)| sm.is_observed(*k) && eligible(s)).map(|(k, _)| k).collect();
+        let pool = cand.len() as i32 + 1;
+        let drawn = n.min(cand.len() as i32);
+        for _ in 0..drawn {
             let k = race.rng.random.next_range(0, cand.len() as i32) as usize;
             race.horses[i].skill_manager.reserved_skill_ids.push(cand.remove(k));
+        }
+        // An observed skill stays out of the draw so that holding it moves no other pick. It takes a pick on its own
+        // generator with the chance that it would have in a pool that held it; a silent one takes nothing from the race.
+        for k in observed {
+            let sm = &mut race.horses[i].skill_manager;
+            let (id, silent) = (sm.skills[k].id, sm.is_silent(k));
+            let own = sm.observed.as_mut().and_then(|o| o.own_rngs[k].as_mut()).expect("an observed skill holds a generator");
+            if own.random.next_range(0, pool) < n.min(pool) {
+                if !silent && drawn > 0 {
+                    sm.reserved_skill_ids.pop();
+                }
+                sm.reserved_skill_ids.push(id);
+            }
         }
     }
 }

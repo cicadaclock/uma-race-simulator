@@ -76,6 +76,19 @@ pub struct HorseInput {
     pub wiz_alt: Option<WizAlt>,
     /// Not game data (analysis hook): bits of [`mechanic`] that run inert for this horse. 0 = normal behaviour.
     pub muted_mechanics: u8,
+    /// Not game data (analysis hook): ids of skills in `skills` that draw from their own generators, seeded from the
+    /// race seed and the skill id, and stay out of the random activation draw, so that holding them moves no other
+    /// draw. One that is also in `muted_skills` is silent: everything else in the race treats it as absent, so the race
+    /// runs bit for bit as without it, while its own triggers and activations still run. A skill that is not silent
+    /// activates as it does when silent, up to its first effect. Empty = normal behaviour.
+    pub observed_skills: Vec<i32>,
+}
+
+impl HorseInput {
+    /// Whether skill `id` is silent, see [`HorseInput::observed_skills`].
+    pub fn is_silent_skill(&self, id: i32) -> bool {
+        self.observed_skills.contains(&id) && self.muted_skills.contains(&id)
+    }
 }
 
 /// See [`HorseInput::wiz_alt`].
