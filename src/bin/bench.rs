@@ -1,10 +1,10 @@
 //! Times GameData load, saved-race decode and `sim::simulate` separately over a corpus (single thread).
 //!   cargo run --release --bin bench -- <corpus dir> [reps] [hash out file] [data_dir]
-//! Each race is simulated `reps` times (default 3); the minimum total over reps is reported. If a hash file is given,
-//! one line per race with a hash of the full SimOutput (all frame/result/event bits) is written, to check that a
-//! performance change leaves the output bit-identical.
+//! Each race is simulated `reps` times (default 3) in its own arena scope; the minimum total over reps is reported. If
+//! a hash file is given, one line per race with a hash of the full SimOutput (all frame/result/event bits) is written,
+//! to check that a performance change leaves the output bit-identical.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use uma_race_sim::api::SimOutput;
+use uma_race_sim::arena::{self, ArenaAllocator, ThreadArena};
 use uma_race_sim::data::{DataEra, GameData, corpus};
 
 /// Counts heap allocations (alloc + realloc calls), to spot per-frame allocations in the sim.
@@ -20,14 +21,14 @@ static ALLOCS: AtomicU64 = AtomicU64::new(0);
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         ALLOCS.fetch_add(1, Relaxed);
-        unsafe { System.alloc(l) }
+        unsafe { ArenaAllocator.alloc(l) }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        unsafe { System.dealloc(p, l) }
+        unsafe { ArenaAllocator.dealloc(p, l) }
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
         ALLOCS.fetch_add(1, Relaxed);
-        unsafe { System.realloc(p, l, n) }
+        unsafe { ArenaAllocator.realloc(p, l, n) }
     }
 }
 #[global_allocator]
@@ -79,15 +80,21 @@ fn main() {
     let mut best = vec![f64::INFINITY; races.len()];
     let mut hashes = Vec::new();
     let mut allocs = 0;
+    let _arena = ThreadArena::attach();
     for _ in 0..reps {
         hashes.clear();
         for (k, (f, input, era)) in races.iter().enumerate() {
             let a = ALLOCS.load(Relaxed);
-            let t = Instant::now();
-            let out = uma_race_sim::sim::simulate(input, &cache[era]);
-            best[k] = best[k].min(t.elapsed().as_secs_f64());
-            allocs += ALLOCS.load(Relaxed) - a;
-            hashes.push(format!("{:016x} {}", output_hash(&out), f.display()));
+            let hash = {
+                // SAFETY: The output ends with the scope, and the hash holds nothing of it.
+                let _scope = unsafe { arena::open_scope() };
+                let t = Instant::now();
+                let out = uma_race_sim::sim::simulate(input, &cache[era]);
+                best[k] = best[k].min(t.elapsed().as_secs_f64());
+                allocs += ALLOCS.load(Relaxed) - a;
+                output_hash(&out)
+            };
+            hashes.push(format!("{hash:016x} {}", f.display()));
         }
     }
     let best: f64 = best.iter().sum();

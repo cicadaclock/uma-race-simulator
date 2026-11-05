@@ -91,9 +91,12 @@ impl<T: for<'de> Deserialize<'de>> JsonFiles<T> {
         if let Some(v) = cache.get(stem) {
             return v.clone();
         }
-        let path = self.dirs.iter().rev().map(|d| d.join(format!("{stem}.json"))).find(|p| p.is_file());
-        let v = path.map(|p| Arc::new(read_json(&p).unwrap_or_else(|e| panic!("{e}"))));
-        cache.insert(stem.to_string(), v.clone());
-        v
+        // The cache outlives any arena scope of the caller.
+        crate::arena::outside(|| {
+            let path = self.dirs.iter().rev().map(|d| d.join(format!("{stem}.json"))).find(|p| p.is_file());
+            let v = path.map(|p| Arc::new(read_json(&p).unwrap_or_else(|e| panic!("{e}"))));
+            cache.insert(stem.to_string(), v.clone());
+            v
+        })
     }
 }
