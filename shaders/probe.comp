@@ -1,0 +1,9 @@
+#version 460
+// Gpu::new: is fma() fused on this device? v[0..3] = f32 a, b, c; v[3..6] = f64 a, b, c; writes fma(a, b, c) of
+// each width to v[6] and v[7].
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer V { uvec2 v[8]; };
+void main() {
+    v[6] = uvec2(floatBitsToUint(fma(uintBitsToFloat(v[0].x), uintBitsToFloat(v[1].x), uintBitsToFloat(v[2].x))), 0u);
+    v[7] = unpackDouble2x32(fma(packDouble2x32(v[3]), packDouble2x32(v[4]), packDouble2x32(v[5])));
+}

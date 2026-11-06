@@ -1,0 +1,46 @@
+#version 460
+// gpu_selftest: one System.Random stream per invocation, driven through every RaceRandom overload by a fixed
+// script that src/bin/gpu_selftest.rs replays on the CPU.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#define NET_RANDOM_BINDING 0
+#include "exact.glsl"
+#include "net_random.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 1) readonly buffer Seeds { int seeds[]; };
+layout(std430, binding = 2) writeonly buffer Out { uvec2 outv[]; };
+layout(push_constant) uniform Push { uint streams; uint calls; } pc;
+
+void main() {
+    uint s = gl_GlobalInvocationID.x;
+    if (s >= pc.streams) return;
+    rng_stride = pc.streams;
+    net_random_init(s, seeds[s]);
+    for (uint j = 0u; j < pc.calls; j++) {
+        uvec2 v;
+        switch (j % 7u) {
+            case 0u: v = uvec2(uint(net_random_internal_sample(s)), 0u); break;
+            case 1u: v = unpackDouble2x32(net_random_next_double(s)); break;
+            case 2u: {
+                int mn = int(j * 7u % 21u) - 10;
+                int mx = mn + 1 + int(j * 13u % 1000u);
+                v = uvec2(uint(race_random_int_range(s, mn, mx)), 0u);
+                break;
+            }
+            case 3u: v = uvec2(uint(race_random_int(s, 1 + int(j * 31u % 100u))), 0u); break;
+            case 4u: {
+                float mn = float(int(j % 17u) - 8) * 0.25;
+                float mx = mn + float(j % 11u) * 0.5 + 0.125;
+                v = uvec2(floatBitsToUint(race_random_float_range(s, mn, mx)), 0u);
+                break;
+            }
+            case 5u: v = uvec2(floatBitsToUint(race_random_float(s, float(j % 23u) * 0.5 + 0.25)), 0u); break;
+            default: v = uvec2(uint(net_random_next_range(s, -2000000000 + int(j), 2000000000)), 0u); break;
+        }
+        outv[j * pc.streams + s] = v;
+    }
+    uint64_t draws = net_random_draws(s);
+    outv[pc.calls * pc.streams + s] = uvec2(uint(draws), uint(draws >> 32));
+}

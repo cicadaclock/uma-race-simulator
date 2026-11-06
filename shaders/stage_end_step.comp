@@ -1,0 +1,26 @@
+#version 460
+// tick::end_step without the recording; is_end is frame_all_finished (set by UpdateHorses), and ends the race
+// (race_done: every kernel then leaves the lane alone). One race per invocation.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#define STATE_BINDING 0
+#define PARAMS_BINDING 1
+#define COURSE_BINDING 2
+#include "exact.glsl"
+#include "race_state.glsl"
+#include "queries.glsl"
+#include "course_buffer.glsl"
+#include "end_step.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant) uniform Push { uint lanes; float dt; } pc;
+
+void main() {
+    st_lane = gl_GlobalInvocationID.x;
+    if (st_lane >= pc.lanes) return;
+    st_lanes = pc.lanes;
+    if (r_race_done()) return;  // the race ended in an earlier step
+    bool is_end = r_frame_all_finished();
+    end_step(is_end);
+    if (is_end) set_r_race_done(true);
+}

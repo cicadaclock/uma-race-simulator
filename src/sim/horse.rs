@@ -287,31 +287,6 @@ pub fn calc_initial_lane(horse_index: i32, initial_lane_type: i32, is_half_gate:
     lane
 }
 
-/// Applies the horse's items: effect 101 removes the start delay, 103 cancels debuffs. Item data isn't in
-/// `GameData`, so a race with items stops at `race::master` (items exist only in special modes).
-pub fn use_item(race: &mut Race, i: usize) {
-    use crate::sim::skill::modifier::{SkillParamModifier, SkillParamModifierKind};
-    for idx in 0..race.horses[i].horse_data.item_ids.len() {
-        let item_id = race.horses[i].horse_data.item_ids[idx];
-        let effect_type_1: i32 = crate::sim::race::master(&format!("item_data[{item_id}].effect_type_1"));
-        let (param, value) = match effect_type_1 {
-            101 => (SkillModifierParam::StartDelayScale, 0.0),
-            103 => (SkillModifierParam::DebuffCancel, 1.0),
-            _ => continue,
-        };
-        race.next_modifier_id += 1;
-        let m = SkillParamModifier {
-            id: race.next_modifier_id,
-            kind: SkillParamModifierKind::Set,
-            time: -1.0,
-            is_one_time: false,
-            is_time_infinite: true,
-            value,
-        };
-        race.horses[i].skill_modifier_receiver.add_modifier(param, m);
-    }
-}
-
 /// Draws the start delay (up to `max`) and flags good / bad starts. One RNG draw unless StartDelayFix > 0.
 pub fn calc_delay_time(race: &mut Race, i: usize, max: f32) {
     let r = &race.horses[i].skill_modifier_receiver;

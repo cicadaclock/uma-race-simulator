@@ -130,9 +130,8 @@ pub fn init_before_start(race: &mut Race) {
     for i in 0..n {
         skill::check_skill_trigger_and_activate_second_group(race, i);
     }
-    for i in 0..n {
-        horse::use_item(race, i);
-    }
+    // Items (special modes) are not applied: what they change (gate, field and mood conditions) is already in the
+    // race data.
     for i in 0..n {
         conserve_power::update_activate_status(race, i);
     }

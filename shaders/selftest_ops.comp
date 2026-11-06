@@ -1,0 +1,108 @@
+#version 460
+// gpu_selftest: one float-primitive test case per invocation. Op codes match `Op` in src/bin/gpu_selftest.rs.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#include "exact.glsl"
+
+layout(local_size_x = 64) in;
+
+struct Case {
+    uint op;
+    uint pad;
+    uvec2 a;  // f32 in .x, or f64 bits (lo, hi)
+    uvec2 b;
+    uvec2 c;
+};
+layout(std430, binding = 0) readonly buffer Cases { Case cases[]; };
+layout(std430, binding = 1) writeonly buffer Results { uvec2 results[]; };
+layout(push_constant) uniform Push { uint count; } pc;
+
+float f32_of(uvec2 v) { return uintBitsToFloat(v.x); }
+double f64_of(uvec2 v) { return packDouble2x32(v); }
+uvec2 of32(float x) { return uvec2(floatBitsToUint(x), 0u); }
+uvec2 of64(double x) { return unpackDouble2x32(x); }
+uvec2 ofi(int x) { return uvec2(uint(x), 0u); }
+
+// Moves a guess k ulps away (for the refinement tests).
+float offset32(float q, int k) {
+    for (int i = 0; i < k; i++) q = next_up32(q);
+    for (int i = 0; i > k; i--) q = next_down32(q);
+    return q;
+}
+double offset64(double q, int k) {
+    for (int i = 0; i < k; i++) q = next_up64(q);
+    for (int i = 0; i > k; i--) q = next_down64(q);
+    return q;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    Case t = cases[i];
+    float a = f32_of(t.a), b = f32_of(t.b), c = f32_of(t.c);
+    double da = f64_of(t.a), db = f64_of(t.b), dc = f64_of(t.c);
+    int k = int(t.c.x);
+    uvec2 r = uvec2(0u);
+    switch (t.op) {
+        // f32
+        case 1u: r = of32(a + b); break;
+        case 2u: r = of32(a - b); break;
+        case 3u: r = of32(a * b); break;
+        case 4u: r = of32(div_rn32(a, b)); break;
+        case 5u: r = of32(sqrt_rn32(a)); break;
+        case 6u: r = of32(a * b + c); break;  // two roundings (no contraction)
+        case 7u: r = of32(fma(a, b, c)); break;  // one rounding
+        case 8u: r = of32(div_rn32_from(a, b, offset32(a / b, k))); break;
+        case 9u: r = of32(sqrt_rn32_from(a, offset32(sqrt(a), k))); break;
+        case 10u: r = of32(float(da)); break;
+        case 11u: r = ofi(f32_to_i32(a)); break;
+        case 12u: r = ofi(f64_to_i32(da)); break;
+        case 13u: r = ofi(floor_to_int(a)); break;
+        case 14u: r = of32(float(int(t.a.x))); break;
+        case 15u: r = of32(mathf_min(a, b)); break;
+        case 16u: r = of32(mathf_max(a, b)); break;
+        case 17u: r = of32(mathf_clamp(a, b, c)); break;
+        case 18u: r = of32(mathf_clamp01(a)); break;
+        case 19u: r = of32(mathf_lerp(a, b, c)); break;
+        case 20u: r = uvec2(mathf_approximately(a, b) ? 1u : 0u, 0u); break;
+        case 21u: r = of32(-a); break;
+        case 22u: r = of32(abs(a)); break;
+        // f64
+        case 40u: r = of64(da + db); break;
+        case 41u: r = of64(da - db); break;
+        case 42u: r = of64(da * db); break;
+        case 43u: r = of64(div_rn64(da, db)); break;
+        case 44u: r = of64(sqrt_rn64(da)); break;
+        case 45u: r = of64(da * db + dc); break;
+        case 46u: r = of64(fma(da, db, dc)); break;
+        case 47u: r = of64(div_rn64_from(da, db, offset64(da / db, k))); break;
+        case 48u: r = of64(sqrt_rn64_from(da, offset64(sqrt(da), k))); break;
+        case 49u: r = of64(floor(da)); break;
+        case 50u: r = of64(double(a)); break;
+        // Expressions from the sim, with the Rust's f64 casts.
+        case 70u: {  // ai/around.rs is_visible: ((gap / v) * 0.638888896f + 0.111111112f) * 0.5, f64
+            double w = (div_rn64(double(a), double(b)) * double(uintBitsToFloat(0x3F238E39u)) + double(uintBitsToFloat(0x3DE38E39u))) * 0.5lf;
+            r = of32(float(w));
+            break;
+        }
+        case 71u: {  // ai/around.rs check_front_block: (1 - (gap / FrontBlockDistanceGap) * 0.6f) * FrontBlockLaneGap, f64
+            double tol = (1.0lf - div_rn64(double(a), double(b)) * double(uintBitsToFloat(0x3F19999Au))) * double(c);
+            r = of32(float(tol));
+            break;
+        }
+        case 72u: {  // tick.rs world displacement: ((dx*dx + 0) + dz*dz).sqrt() in f64
+            r = of32(float(sqrt_rn64((double(a) * double(a) + 0.0lf) + double(b) * double(b))));
+            break;
+        }
+        case 73u: r = of32(mathf_pow2(a)); break;  // physics/hp.rs: Mathf.Pow(x, 2)
+        case 74u: r = of32(float((double(b) - double(a)) * double(c) + double(a))); break;  // course/lanes.rs lerp
+        case 75u: r = of32(float(double(a) * double(b) + double(c))); break;  // ai/lane.rs: dt * speed + prev
+        case 76u: r = of32(float(double(a) * div_rn64(double(b), double(c)))); break;  // tick.rs displacement cap
+        // The hardware's own operations (informational).
+        case 100u: r = of32(a / b); break;
+        case 101u: r = of32(sqrt(a)); break;
+        case 102u: r = of64(da / db); break;
+        case 103u: r = of64(sqrt(da)); break;
+    }
+    results[i] = r;
+}

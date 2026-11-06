@@ -39,9 +39,19 @@ pub fn start(race: &mut Race) {
 /// One DT step of the race loop; returns whether every horse has finished (then call [`finish`]). A `Race` cloned
 /// between steps continues exactly as the original would.
 pub fn step(race: &mut Race) -> bool {
+    begin_step(race);
+    let is_end = frame(race, DT);
+    end_step(race, is_end)
+}
+
+/// The part of [`step`] before the frame.
+pub fn begin_step(race: &mut Race) {
     race.accumulate_time_since_start += DT;
     race.recorder.cur_time += DT;
-    let is_end = frame(race, DT);
+}
+
+/// The part of [`step`] after the frame; returns `is_end`.
+pub fn end_step(race: &mut Race, is_end: bool) -> bool {
     if !is_end {
         race::update_distance_diff_max(race);
     }
@@ -73,38 +83,102 @@ fn first_frame(race: &mut Race) -> bool {
     all_finished
 }
 
+/// The stages of one frame, in order. Each covers every horse, so the state between two stages is a whole `Race`
+/// and one stage can be run on its own; the GPU port checks its kernels stage by stage against [`run_stage`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Stage {
+    /// Scan view snapshot, then `pre_update` per horse (around table, modifier timers).
+    PreUpdate,
+    /// Priority-1 skills of every unfinished horse.
+    SkillsFirst,
+    /// Priority-0 skills of every unfinished horse.
+    SkillsSecond,
+    /// Decisions and movement per horse; sets `all_finished`.
+    UpdateHorses,
+    /// Overlap, spot struggle, dueling, pacemaker (from the July 2026 courses on).
+    Field,
+    /// Near-horse timers per horse.
+    PostUpdate,
+    /// The order (or, on the last frame, the finish order); reads `all_finished`.
+    Order,
+    /// Order timers, style leaders, pacemaker (before July 2026) and the end-of-frame caches.
+    EndOfFrame,
+}
+
+impl Stage {
+    pub const ALL: [Stage; 8] = [
+        Stage::PreUpdate,
+        Stage::SkillsFirst,
+        Stage::SkillsSecond,
+        Stage::UpdateHorses,
+        Stage::Field,
+        Stage::PostUpdate,
+        Stage::Order,
+        Stage::EndOfFrame,
+    ];
+}
+
 /// Returns whether every horse has finished.
 fn frame(race: &mut Race, dt: f32) -> bool {
-    let n = race.horses.len();
-    around::snapshot_scan_view(race);
-    for i in 0..n {
-        pre_update(race, i, dt);
-    }
-    for i in 0..n {
-        if !race.horses[i].is_finished {
-            skill::update_first_group(race, i, dt);
-        }
-    }
-    for i in 0..n {
-        if !race.horses[i].is_finished {
-            skill::update_second_group(race, i, dt);
-        }
-    }
     let mut all_finished = true;
-    for i in 0..n {
-        // Every horse is updated (no short-circuit).
-        all_finished &= update_horse(race, i, dt);
+    for stage in Stage::ALL {
+        run_stage(race, stage, dt, &mut all_finished);
     }
-    update_overlap(race);
-    compete_top::update(race, dt);
-    compete_fight::update(race);
-    if !race.data.era.pre_2026_07_courses {
-        pacemaker::update(race);
+    all_finished
+}
+
+/// One stage of a frame. `all_finished` is written by [`Stage::UpdateHorses`] and read by [`Stage::Order`].
+pub fn run_stage(race: &mut Race, stage: Stage, dt: f32, all_finished: &mut bool) {
+    let n = race.horses.len();
+    match stage {
+        Stage::PreUpdate => {
+            around::snapshot_scan_view(race);
+            for i in 0..n {
+                pre_update(race, i, dt);
+            }
+        }
+        Stage::SkillsFirst => {
+            for i in 0..n {
+                if !race.horses[i].is_finished {
+                    skill::update_first_group(race, i, dt);
+                }
+            }
+        }
+        Stage::SkillsSecond => {
+            for i in 0..n {
+                if !race.horses[i].is_finished {
+                    skill::update_second_group(race, i, dt);
+                }
+            }
+        }
+        Stage::UpdateHorses => {
+            *all_finished = true;
+            for i in 0..n {
+                // Every horse is updated (no short-circuit).
+                *all_finished &= update_horse(race, i, dt);
+            }
+        }
+        Stage::Field => {
+            update_overlap(race);
+            compete_top::update(race, dt);
+            compete_fight::update(race);
+            if !race.data.era.pre_2026_07_courses {
+                pacemaker::update(race);
+            }
+        }
+        Stage::PostUpdate => {
+            for i in 0..n {
+                post_update(race, i, dt);
+            }
+            debug::step(race);
+        }
+        Stage::Order => order_stage(race, dt, *all_finished),
+        Stage::EndOfFrame => end_of_frame(race, dt),
     }
-    for i in 0..n {
-        post_update(race, i, dt);
-    }
-    debug::step(race);
+}
+
+fn order_stage(race: &mut Race, dt: f32, all_finished: bool) {
+    let n = race.horses.len();
     if !all_finished {
         order::calc_horse_order(race, dt);
     } else {
@@ -117,6 +191,9 @@ fn frame(race: &mut Race, dt: f32) -> bool {
         }
         // Team scoring (team modes) is not simulated.
     }
+}
+
+fn end_of_frame(race: &mut Race, dt: f32) {
     field::update_last_order_time(race, dt);
     field::update_running_style_first_and_last_order_horses(race);
     // Before the July 2026 update: the pacemaker is picked from this frame's order, after the order caches above, so
@@ -128,7 +205,6 @@ fn frame(race: &mut Race, dt: f32) -> bool {
     field::cache_prev_activated_skills(race);
     field::cache_activate_heal_skill_horse_history_list(race);
     field::update_lane_distance_rate(race);
-    all_finished
 }
 
 fn pre_update(race: &mut Race, i: usize, dt: f32) {

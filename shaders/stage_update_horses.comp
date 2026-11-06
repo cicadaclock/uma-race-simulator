@@ -1,0 +1,40 @@
+#version 460
+// Stage::UpdateHorses. One race per invocation; the RNG is the race state's rng field.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#define STATE_BINDING 0
+#define PARAMS_BINDING 1
+#define COURSE_BINDING 2
+#define NET_RANDOM_IN_STATE
+#define SORT_CAP 104
+#include "exact.glsl"
+#include "race_state.glsl"
+#include "net_random.glsl"
+#include "sort.glsl"
+#include "modifiers.glsl"
+#include "queries.glsl"
+#include "stats.glsl"
+#include "transcend.glsl"
+#include "course_path.glsl"
+#include "position_keep.glsl"
+#include "temptation.glsl"
+#include "overtake.glsl"
+#include "lane.glsl"
+#include "speed.glsl"
+#include "last_spurt.glsl"
+#include "conserve_power.glsl"
+#include "skill_layout.glsl"
+#include "skill_state.glsl"
+#include "update_horses.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant) uniform Push { uint lanes; float dt; } pc;
+
+void main() {
+    st_lane = gl_GlobalInvocationID.x;
+    if (st_lane >= pc.lanes) return;
+    st_lanes = pc.lanes;
+    if (r_race_done()) return;  // the race ended in an earlier step
+    update_horses_stage(pc.dt);
+    if (transcend_fault) gpu_fault(FAULT_TRANSCEND);
+}

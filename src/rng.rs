@@ -71,6 +71,20 @@ impl NetRandom {
         r
     }
 
+    /// The whole state as 60 words: the seed array, `inext`, `inextp`, then `draws` (low word first). The GPU keeps
+    /// the generator in this form.
+    pub fn words(&self) -> [u32; 60] {
+        let mut w = [0u32; 60];
+        for (k, &v) in self.seed_array.iter().enumerate() {
+            w[k] = v as u32;
+        }
+        w[56] = self.inext as u32;
+        w[57] = self.inextp as u32;
+        w[58] = self.draws as u32;
+        w[59] = (self.draws >> 32) as u32;
+        w
+    }
+
     pub fn next_double(&mut self) -> f64 {
         self.internal_sample() as f64 * (1.0 / MBIG as f64)
     }

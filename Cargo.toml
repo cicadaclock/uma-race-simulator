@@ -10,6 +10,33 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 flate2 = "1"
 base64 = "0.22"
+# Vulkan compute (feature `gpu`). `loaded` opens the system's vulkan-1.dll / libvulkan.so at run time, so building
+# needs no Vulkan SDK; the GPU driver ships the loader.
+ash = { version = "0.38", optional = true, default-features = false, features = ["loaded", "std", "debug"] }
+
+[features]
+# GPU (Vulkan GLSL) backend: `cargo run --release --features gpu --bin gpu_selftest`
+gpu = ["dep:ash"]
+
+[[bin]]
+name = "gpu_selftest"
+required-features = ["gpu"]
+
+[[bin]]
+name = "gpu_stagecheck"
+required-features = ["gpu"]
+
+[[bin]]
+name = "gpu_mathcheck"
+required-features = ["gpu"]
+
+[[bin]]
+name = "gpu_racecheck"
+required-features = ["gpu"]
+
+[[bin]]
+name = "gpu_bench"
+required-features = ["gpu"]
 
 [profile.dev]
 opt-level = 1
